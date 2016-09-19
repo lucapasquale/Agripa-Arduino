@@ -28,7 +28,7 @@ const byte devAddr[4] = {0x02, 0x01, 0x55, 0xB0};
 const byte nwkSKey[16] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C};
 const byte appSKey[16] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C};
 
-const int nCabos = 5;
+const uint8_t nCabos = 5;
 const float ganho = 1000.0;
 
 byte data[nCabos * 8 + 9];
@@ -47,7 +47,7 @@ void setup() {
   delay(6000);
 
   ttu.showStatus();
-  debugPrintLn("Setup complete!");
+  debugPrintLn("LoRa setup complete!");
   delay(1000);
 
   pinMode(PinMuxTerm0, OUTPUT);
@@ -69,15 +69,18 @@ void loop() {
 }
 
 void LeSensores() {
+  data[0] = nCabos;
+  debugPrint(nCabos); debugPrintLn(" cabos");
+  
   int16_t temperature = dht.readTemperature() * 10;
-  data[0] = highByte(temperature);
-  data[1] = lowByte(temperature);
+  data[1] = highByte(temperature);
+  data[2] = lowByte(temperature);
   debugPrint("Temperatura: "); debugPrintLn(temperature / 10.0);
   tensaoRef = TempParaTensao(temperature / 10.0);
 
   int16_t humidity = dht.readHumidity() * 10;
-  data[2] = highByte(humidity);
-  data[3] = lowByte(humidity);
+  data[3] = highByte(humidity);
+  data[4] = lowByte(humidity);
   debugPrint("Umidade: "); debugPrintLn(humidity / 10.0);
 
   for (int cabo = 0; cabo < nCabos; cabo++)
@@ -87,12 +90,14 @@ void LeSensores() {
     digitalWrite(PinMuxCabo1, bitRead(cabo, 1));
     digitalWrite(PinMuxCabo2, bitRead(cabo, 2));
 
+    for (int sensor = 0; sensor < 8; sensor++)
     {
       //Seta controle para o MUX que controla o termopar
       digitalWrite(PinMuxTerm0, bitRead(sensor, 0));
       digitalWrite(PinMuxTerm1, bitRead(sensor, 1));
       digitalWrite(PinMuxTerm2, bitRead(sensor, 2));
 
+      //1B controle, 4B temp/umid ext, 4B temp/umid int
       int pos = 9 + (cabo * 8) + sensor;
       int8_t temp = GetTemp();
       data[pos] = temp;
@@ -110,6 +115,7 @@ int8_t GetTemp()
   return round(temp);
 }
 
+float TempParaTensao(float _temp) {
   return 0.0411 * _temp - 0.0226;
 }
 
