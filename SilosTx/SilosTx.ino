@@ -1,4 +1,6 @@
-//BIBLIOTECAS
+//BIBLIOTECAS-----------------------------------------------------------------------------------------------------------------//
+#include <math.h>
+
 #include <TheThingsUno.h>
 TheThingsUno ttu;
 
@@ -7,38 +9,50 @@ SoftwareSerial Serial1(2, 3);
 #define debugSerial Serial
 #define loraSerial Serial1
 
-#include <DHT.h>
-#define DHTPIN 4
-#define DHTTYPE DHT22
-DHT dht(DHTPIN, DHTTYPE);
-
-#define PinMuxTerm0 5
-#define PinMuxTerm1 6
-#define PinMuxTerm2 7
-
-#define PinMuxCabo0 8
-#define PinMuxCabo1 9
-#define PinMuxCabo2 10
-
 #define debugPrintLn(...) { if (debugSerial) debugSerial.println(__VA_ARGS__); }
 #define debugPrint(...) { if (debugSerial) debugSerial.print(__VA_ARGS__); }
 
-//CONSTANTES E VARIAVEIS
+
+#include <DHT.h>
+DHT dhtInt(4, DHT22);
+
+#define DHTPIN 4
+DHT dhtExt(5, DHT22);
+
+#define PinMuxTerm0 6
+#define PinMuxTerm1 7
+#define PinMuxTerm2 8
+
+#define PinMuxCabo0 9
+#define PinMuxCabo1 10
+#define PinMuxCabo2 11
+
+//CONSTANTES E VARIAVEIS---------------------------------------------------------------------------------------------------//
 const byte devAddr[4] = {0x02, 0x01, 0x55, 0xB0};
 const byte nwkSKey[16] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C};
 const byte appSKey[16] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C};
 
 const uint8_t nCabos = 5;
+const uint8_t nSensores = 8;
 const float ganho = 1000.0;
 
-byte data[nCabos * 8 + 9];
+int16_t tempInt, umidInt, tempExt, umidExt;
+
+uint8_t altura;
+int16_t tempGrao;
+
+byte data[12];
 float tensaoRef;
+uint8_t difUmid;
+
+//ERROS POSSIVEIS---------------------------------------------------------------------------------------------------------//
+bool erro_dht_int, erro_dht_ext, erro_termopar, erro_altura;
 
 
 void setup() {
   debugSerial.begin(115200);
   loraSerial.begin(57600);
-  dht.begin();
+  dhtInt.begin();
   delay(1000);
 
   ttu.init(loraSerial, debugSerial);
@@ -59,30 +73,86 @@ void setup() {
   pinMode(PinMuxCabo2, OUTPUT);
 }
 
-void loop() {
-  LeSensores();
-  ttu.sendBytes(data, sizeof(data), 30, true);
+//LOOP--------------------------------------------------------------------------------------------------------------------//
+void loop() 
+{
+  //Le DHT da parte interna e externa do silo
+  LeDHT();
+  
+  //Le temperatura dos termopares e calcula altura
 
-  for (int t = 0; t < 15 * 60; t++) {
-    delay(1000);
+  //Verifica se o ventilador deve ser ligado
+
+  //Envia os dados LoRa
+}
+
+//FUNÇÕES-----------------------------------------------------------------------------------------------------------------//
+void LeDHT()
+{
+  erro_dht_int = false;
+  erro_dht_ext = false;
+
+  float tempI = dhtInt.readTemperature();
+  float umidI = dhtInt.readHumidity();
+
+  if (isnan(tempI) == 1 || isnan(umidI) == 1)
+  {
+    erro_dht_int = true;
+    for (int i = 3; i <= 6; i++)
+      data[i] = 0xFF;
+  }
+  else
+  {
+    tempInt = round(tempI * 10);
+    data[3] = highByte(tempInt);
+    data[4] = lowByte(tempInt);
+    debugPrint("Temperatura Interna: "); debugPrintLn(tempInt / 10.0);
+
+    umidInt = round(umidI * 10);
+    data[5] = highByte(umidInt);
+    data[6] = lowByte(umidInt);
+    debugPrint("Umidade Interna: "); debugPrintLn(umidInt / 10.0);
+  }
+
+
+  float tempE = dhtExt.readTemperature();
+  float umidE = dhtExt.readHumidity();
+
+  if (isnan(tempE) == 1 || isnan(umidE) == 1)
+  {
+    erro_dht_ext = true;
+    for (int i = 7; i <= 10; i++)
+      data[i] = 0xFF;
+  }
+  else
+  {
+    tempExt = round(tempE * 10);
+    data[7] = highByte(tempExt);
+    data[8] = lowByte(tempExt);
+    debugPrint("Temperatura Interna: "); debugPrintLn(tempExt / 10.0);
+
+    umidExt = round(umidE * 10);
+    data[9] = highByte(umidExt);
+    data[10] = lowByte(umidExt);
+    debugPrint("Umidade Interna: "); debugPrintLn(umidExt / 10.0);
+
+    tensaoRef = TempParaTensao(tempExt);
   }
 }
 
-void LeSensores() {
-  data[0] = nCabos;
-  debugPrint(nCabos); debugPrintLn(" cabos");
+void LeTermopares()
+{
+  erro_termopar = false;
+  erro_altura = false;
   
-  int16_t temperature = dht.readTemperature() * 10;
-  data[1] = highByte(temperature);
-  data[2] = lowByte(temperature);
-  debugPrint("Temperatura: "); debugPrintLn(temperature / 10.0);
-  tensaoRef = TempParaTensao(temperature / 10.0);
-
-  int16_t humidity = dht.readHumidity() * 10;
-  data[3] = highByte(humidity);
-  data[4] = lowByte(humidity);
-  debugPrint("Umidade: "); debugPrintLn(humidity / 10.0);
-
+  if(erro_dht_ext)
+  {
+    data[1] = 0xFF;
+    data[2] = 0xFF;
+    return;
+  }
+  
+  float temps[nCabos][nSensores];
   for (int cabo = 0; cabo < nCabos; cabo++)
   {
     //Seta controle para o MUX que seleciona o cabo
@@ -90,29 +160,52 @@ void LeSensores() {
     digitalWrite(PinMuxCabo1, bitRead(cabo, 1));
     digitalWrite(PinMuxCabo2, bitRead(cabo, 2));
 
-    for (int sensor = 0; sensor < 8; sensor++)
+    for (int sensor = 0; sensor < nSensores; sensor++)
     {
       //Seta controle para o MUX que controla o termopar
       digitalWrite(PinMuxTerm0, bitRead(sensor, 0));
       digitalWrite(PinMuxTerm1, bitRead(sensor, 1));
       digitalWrite(PinMuxTerm2, bitRead(sensor, 2));
 
-      //1B controle, 4B temp/umid ext, 4B temp/umid int
-      int pos = 9 + (cabo * 8) + sensor;
-      int8_t temp = GetTemp();
-      data[pos] = temp;
-      debugPrint("Temp termopar "); debugPrint(cabo); debugPrint("/"); debugPrint(sensor); debugPrint(": "); debugPrintLn(temp);
+      delay(100);
+      temps[cabo][sensor] = GetTemp();
+
+      if (temps[cabo][sensor] > 50) erro_termopar = true;
     }
   }
+
+  float altIndice[nCabos];
+  float sum;
+  for (int i = 0; i < nCabos; i++)
+  {
+    float maxDif = 3;
+    for (int j = 0; j < nSensores - 1; j++)
+    {
+      float dif = temps[i][j] - temps[i][j + 1];
+      if (abs(dif) > abs(maxDif))
+      {
+        altIndice[i] = j + 0.5;
+        maxDif = dif;
+      }
+
+      if (maxDif == 3) erro_altura = true;
+    }
+    sum += altIndice[i];
+  }
+  sum /= (float)nCabos;
+
+  altura = (100.0 * sum) / 6.5;
+
+  if (altura > 100 || altura <= 0) erro_altura = true;
 }
 
 //Tensão em mV e temp em ºC
-int8_t GetTemp()
+float GetTemp()
 {
   int tensaoD = analogRead(A0);
   float tensaoMiliV = map(tensaoD, 0, 1023, 0.0, 5000.0);
   float temp = 24.308 * ((tensaoMiliV / ganho) + tensaoRef) + 0.557;
-  return round(temp);
+  return temp;
 }
 
 float TempParaTensao(float _temp) {
