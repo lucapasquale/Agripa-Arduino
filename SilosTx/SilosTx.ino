@@ -15,8 +15,6 @@ SoftwareSerial Serial1(2, 3);
 
 #include <DHT.h>
 DHT dhtInt(4, DHT22);
-
-#define DHTPIN 4
 DHT dhtExt(5, DHT22);
 
 #define PinMuxTerm0 6
@@ -36,12 +34,14 @@ const uint8_t nCabos = 5;
 const uint8_t nSensores = 8;
 const float ganho = 1000.0;
 
-int16_t tempInt, umidInt, tempExt, umidExt;
+//Constantes gráfico de aeração
+const float k = 0.1;
+const int mInf = 3, mSup = 1;
 
-uint8_t altura;
-int16_t tempGrao;
+bool ligarVent;
+float tempI, umidI, tempE, umidE, tempGrao, altura;
 
-byte data[12];
+byte data[12]; //0: Bits controle / 1: Uso estimado / 2,3: temp grao / 4,5: temp int / 6,7: umid int / 8,9: temp ext / 10,11: umid ext
 float tensaoRef;
 uint8_t difUmid;
 
@@ -74,16 +74,24 @@ void setup() {
 }
 
 //LOOP--------------------------------------------------------------------------------------------------------------------//
-void loop() 
+void loop()
 {
   //Le DHT da parte interna e externa do silo
   LeDHT();
-  
+
   //Le temperatura dos termopares e calcula altura
+  LeTermopares();
 
   //Verifica se o ventilador deve ser ligado
+  ChecaVentiladores();
+  
+  //Envia comando de ligar para o segundo arduino
+
+  //Gera os bits de controle
+  SetaBitsControle();
 
   //Envia os dados LoRa
+  ttu.sendBytes(data, sizeof(data), 30, true);
 }
 
 //FUNÇÕES-----------------------------------------------------------------------------------------------------------------//
@@ -92,48 +100,45 @@ void LeDHT()
   erro_dht_int = false;
   erro_dht_ext = false;
 
-  float tempI = dhtInt.readTemperature();
-  float umidI = dhtInt.readHumidity();
-
-  if (isnan(tempI) == 1 || isnan(umidI) == 1)
+  tempI = dhtInt.readTemperature();
+  umidI = dhtInt.readHumidity();
+  if (isnan(tempI) || isnan(umidI))
   {
     erro_dht_int = true;
-    for (int i = 3; i <= 6; i++)
+    for (int i = 4; i <= 7; i++)
       data[i] = 0xFF;
   }
   else
   {
-    tempInt = round(tempI * 10);
-    data[3] = highByte(tempInt);
-    data[4] = lowByte(tempInt);
+    int tempInt = round(tempI * 10);
+    data[4] = highByte(tempInt);
+    data[5] = lowByte(tempInt);
     debugPrint("Temperatura Interna: "); debugPrintLn(tempInt / 10.0);
 
-    umidInt = round(umidI * 10);
-    data[5] = highByte(umidInt);
-    data[6] = lowByte(umidInt);
+    int umidInt = round(umidI * 10);
+    data[6] = highByte(umidInt);
+    data[7] = lowByte(umidInt);
     debugPrint("Umidade Interna: "); debugPrintLn(umidInt / 10.0);
   }
 
-
-  float tempE = dhtExt.readTemperature();
-  float umidE = dhtExt.readHumidity();
-
+  tempE = dhtExt.readTemperature();
+  umidE = dhtExt.readHumidity();
   if (isnan(tempE) == 1 || isnan(umidE) == 1)
   {
     erro_dht_ext = true;
-    for (int i = 7; i <= 10; i++)
+    for (int i = 8; i <= 11; i++)
       data[i] = 0xFF;
   }
   else
   {
-    tempExt = round(tempE * 10);
-    data[7] = highByte(tempExt);
-    data[8] = lowByte(tempExt);
+    int tempExt = round(tempE * 10);
+    data[8] = highByte(tempExt);
+    data[9] = lowByte(tempExt);
     debugPrint("Temperatura Interna: "); debugPrintLn(tempExt / 10.0);
 
-    umidExt = round(umidE * 10);
-    data[9] = highByte(umidExt);
-    data[10] = lowByte(umidExt);
+    int umidExt = round(umidE * 10);
+    data[10] = highByte(umidExt);
+    data[11] = lowByte(umidExt);
     debugPrint("Umidade Interna: "); debugPrintLn(umidExt / 10.0);
 
     tensaoRef = TempParaTensao(tempExt);
@@ -144,14 +149,15 @@ void LeTermopares()
 {
   erro_termopar = false;
   erro_altura = false;
-  
-  if(erro_dht_ext)
+
+  if (erro_dht_ext)
   {
     data[1] = 0xFF;
     data[2] = 0xFF;
     return;
   }
-  
+
+  //MEDIÇÃO DAS TEMPERATURAS DOS TERMOPARES
   float temps[nCabos][nSensores];
   for (int cabo = 0; cabo < nCabos; cabo++)
   {
@@ -170,33 +176,86 @@ void LeTermopares()
       delay(100);
       temps[cabo][sensor] = GetTemp();
 
-      if (temps[cabo][sensor] > 50) erro_termopar = true;
+      if (temps[cabo][sensor] >= 60) erro_termopar = true;
     }
   }
 
-  float altIndice[nCabos];
+  //CALCULO DA ALTURA E USO ESTIMADO DO SILO
+  int altIndice[nCabos];
   float sum;
   for (int i = 0; i < nCabos; i++)
   {
-    float maxDif = 3;
+    float maxDif = 2;
     for (int j = 0; j < nSensores - 1; j++)
     {
       float dif = temps[i][j] - temps[i][j + 1];
       if (abs(dif) > abs(maxDif))
       {
-        altIndice[i] = j + 0.5;
+        altIndice[i] = j;
         maxDif = dif;
       }
 
-      if (maxDif == 3) erro_altura = true;
+      if (maxDif == 2) erro_altura = true;
     }
-    sum += altIndice[i];
+    sum += altIndice[i] + 0.5;
   }
   sum /= (float)nCabos;
-
   altura = (100.0 * sum) / 6.5;
 
-  if (altura > 100 || altura <= 0) erro_altura = true;
+  int alt = round(altura);
+  if (alt > 100 || alt <= 0) erro_altura = true;
+  data[1] = lowByte(alt);
+
+  //CALCULO DA TEMPERATURA DO GRÃO
+  float sumCabo[nCabos];
+  tempGrao = 0;
+  for (int i = 0; i < nCabos; i++)
+  {
+    sumCabo[i] = 0;
+    for (int j = 0; j < altIndice[i]; j++)
+    {
+      sumCabo[i] += temps[i][j];
+    }
+    sumCabo[i] /= (altIndice[i] + 1);
+
+    if (sumCabo[i] > 60) erro_termopar = true;
+    tempGrao += sumCabo[i];
+  }
+  tempGrao /= (float)nCabos;
+
+  int grao = round(tempGrao * 10);
+  data[2] = highByte(grao);
+  data[3] = lowByte(grao);
+}
+
+void ChecaVentiladores()
+{
+  if (erro_dht_ext || erro_termopar)
+    return;
+
+  float difTemp = tempGrao - tempE;
+
+  if (difTemp <= umidE * k - mInf) {
+    //Zona vermelha - aeração sem interesse
+    ligarVent = false;
+
+  } else if (difTemp > umidE * k - mInf && difTemp <= umidE * k - mSup) {
+    //Zona verde / azul - aeração recomendada
+    ligarVent = true;
+
+  } else {
+    //Zona amarela - Aeração possivel mas sem interesse
+    ligarVent = false;
+  }
+}
+
+void SetaBitsControle()
+{
+  bitWrite(data[0], 7, ligarVent == true ? 1 : 0);
+  bitWrite(data[0], 6, erro_dht_int == true ? 1 : 0);
+  bitWrite(data[0], 5, erro_dht_ext == true ? 1 : 0);
+  bitWrite(data[0], 4, erro_termopar == true ? 1 : 0);
+  bitWrite(data[0], 3, erro_altura == true ? 1 : 0);
 }
 
 //Tensão em mV e temp em ºC
