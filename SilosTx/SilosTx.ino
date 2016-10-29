@@ -6,37 +6,42 @@ TheThingsUno ttu;
 
 #include <SoftwareSerial.h>
 SoftwareSerial Serial1(2, 3);
+SoftwareSerial RS485Serial(9, 10); // RX, TX
+#define PinRS485 A4
+
 #define debugSerial Serial
 #define loraSerial Serial1
 
 #define debugPrintLn(...) { if (debugSerial) debugSerial.println(__VA_ARGS__); }
 #define debugPrint(...) { if (debugSerial) debugSerial.print(__VA_ARGS__); }
 
-
 #include <DHT.h>
 DHT dhtInt(4, DHT22);
+
+#define DHTPIN 4
 DHT dhtExt(5, DHT22);
 
 #define PinMuxTerm0 6
 #define PinMuxTerm1 7
 #define PinMuxTerm2 8
 
-#define PinMuxCabo0 9
-#define PinMuxCabo1 10
-#define PinMuxCabo2 11
+#define PinMuxCabo0 A0
+#define PinMuxCabo1 A1
+#define PinMuxCabo2 A2
+
+#include <SPI.h>
+#include "Nanoshield_Termopar.h"
+
+// Termopar Nanoshield on CS pin D8, type T thermocouple, no averaging
+Nanoshield_Termopar tc(A3, TC_TYPE_T, TC_AVG_OFF);
 
 //CONSTANTES E VARIAVEIS---------------------------------------------------------------------------------------------------//
 const byte devAddr[4] = {0x02, 0x01, 0x55, 0xB0};
 const byte nwkSKey[16] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C};
 const byte appSKey[16] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C};
 
-const uint8_t nCabos = 5;
-const uint8_t nSensores = 8;
-const float ganho = 1000.0;
-
-//Constantes gráfico de aeração
-const float k = 0.1;
-const int mInf = 3, mSup = 1;
+#define nCabos 5
+#define nSensores 8
 
 bool ligarVent;
 float tempI, umidI, tempE, umidE, tempGrao, altura;
@@ -46,13 +51,14 @@ float tensaoRef;
 uint8_t difUmid;
 
 //ERROS POSSIVEIS---------------------------------------------------------------------------------------------------------//
-bool erro_dht_int, erro_dht_ext, erro_termopar, erro_altura;
+bool erro_dht_int, erro_dht_ext, erro_termopar, erro_altura, erro_rs485;
 
 
 void setup() {
   debugSerial.begin(115200);
   loraSerial.begin(57600);
   dhtInt.begin();
+  dhtExt.begin();
   delay(1000);
 
   ttu.init(loraSerial, debugSerial);
@@ -71,6 +77,12 @@ void setup() {
   pinMode(PinMuxCabo0, OUTPUT);
   pinMode(PinMuxCabo1, OUTPUT);
   pinMode(PinMuxCabo2, OUTPUT);
+
+  pinMode(PinRS485, OUTPUT);
+  digitalWrite(PinRS485, 0);
+  RS485Serial.begin(4800);
+
+  tc.begin();
 }
 
 //LOOP--------------------------------------------------------------------------------------------------------------------//
@@ -82,16 +94,17 @@ void loop()
   //Le temperatura dos termopares e calcula altura
   LeTermopares();
 
-  //Verifica se o ventilador deve ser ligado
-  ChecaVentiladores();
-  
-  //Envia comando de ligar para o segundo arduino
-
   //Gera os bits de controle
   SetaBitsControle();
 
   //Envia os dados LoRa
   ttu.sendBytes(data, sizeof(data), 30, true);
+
+  //Envia comando de ligar para o segundo arduino
+
+
+  //Aguarda próxima transmissão
+
 }
 
 //FUNÇÕES-----------------------------------------------------------------------------------------------------------------//
@@ -123,7 +136,7 @@ void LeDHT()
 
   tempE = dhtExt.readTemperature();
   umidE = dhtExt.readHumidity();
-  if (isnan(tempE) == 1 || isnan(umidE) == 1)
+  if (isnan(tempE) || isnan(umidE))
   {
     erro_dht_ext = true;
     for (int i = 8; i <= 11; i++)
@@ -140,8 +153,6 @@ void LeDHT()
     data[10] = highByte(umidExt);
     data[11] = lowByte(umidExt);
     debugPrint("Umidade Interna: "); debugPrintLn(umidExt / 10.0);
-
-    tensaoRef = TempParaTensao(tempExt);
   }
 }
 
@@ -149,13 +160,6 @@ void LeTermopares()
 {
   erro_termopar = false;
   erro_altura = false;
-
-  if (erro_dht_ext)
-  {
-    data[1] = 0xFF;
-    data[2] = 0xFF;
-    return;
-  }
 
   //MEDIÇÃO DAS TEMPERATURAS DOS TERMOPARES
   float temps[nCabos][nSensores];
@@ -174,9 +178,13 @@ void LeTermopares()
       digitalWrite(PinMuxTerm2, bitRead(sensor, 2));
 
       delay(100);
-      temps[cabo][sensor] = GetTemp();
 
-      if (temps[cabo][sensor] >= 60) erro_termopar = true;
+      tc.read();
+      temps[cabo][sensor] = tc.getExternal();
+
+      if (tc.hasError()) erro_termopar = true;
+
+      delay(900);
     }
   }
 
@@ -200,11 +208,12 @@ void LeTermopares()
     sum += altIndice[i] + 0.5;
   }
   sum /= (float)nCabos;
-  altura = (100.0 * sum) / 6.5;
+  altura = (100.0 * sum) / (nSensores - 1.5);
 
-  int alt = round(altura);
+  uint8_t alt = round(altura);
   if (alt > 100 || alt <= 0) erro_altura = true;
   data[1] = lowByte(alt);
+  debugPrint("Altura: "); debugPrintLn(alt);
 
   //CALCULO DA TEMPERATURA DO GRÃO
   float sumCabo[nCabos];
@@ -224,51 +233,36 @@ void LeTermopares()
   tempGrao /= (float)nCabos;
 
   int grao = round(tempGrao * 10);
+  debugPrint("Temperatura grão: "); debugPrintLn(grao / 10.0);
   data[2] = highByte(grao);
   data[3] = lowByte(grao);
 }
 
-void ChecaVentiladores()
-{
-  if (erro_dht_ext || erro_termopar)
-    return;
-
-  float difTemp = tempGrao - tempE;
-
-  if (difTemp <= umidE * k - mInf) {
-    //Zona vermelha - aeração sem interesse
-    ligarVent = false;
-
-  } else if (difTemp > umidE * k - mInf && difTemp <= umidE * k - mSup) {
-    //Zona verde / azul - aeração recomendada
-    ligarVent = true;
-
-  } else {
-    //Zona amarela - Aeração possivel mas sem interesse
-    ligarVent = false;
-  }
-}
-
 void SetaBitsControle()
 {
-  bitWrite(data[0], 7, ligarVent == true ? 1 : 0);
-  bitWrite(data[0], 6, erro_dht_int == true ? 1 : 0);
-  bitWrite(data[0], 5, erro_dht_ext == true ? 1 : 0);
-  bitWrite(data[0], 4, erro_termopar == true ? 1 : 0);
-  bitWrite(data[0], 3, erro_altura == true ? 1 : 0);
+  bitWrite(data[0], 7, ligarVent ? 1 : 0);
+  bitWrite(data[0], 6, erro_dht_int ? 1 : 0);
+  bitWrite(data[0], 5, erro_dht_ext ? 1 : 0);
+  bitWrite(data[0], 4, erro_termopar ? 1 : 0);
+  bitWrite(data[0], 3, erro_altura ? 1 : 0);
+  bitWrite(data[0], 2, erro_rs485 ? 1 : 0);
 }
 
-//Tensão em mV e temp em ºC
-float GetTemp()
-{
-  int tensaoD = analogRead(A0);
-  float tensaoMiliV = map(tensaoD, 0, 1023, 0.0, 5000.0);
-  float temp = 24.308 * ((tensaoMiliV / ganho) + tensaoRef) + 0.557;
-  return temp;
-}
+void EnviaRS485() {
+  digitalWrite(PinRS485, 1);  // Enable RS485 Transmit
+  RS485Serial.write(0xA1);    //Envia dado para ligar/desligar
+  delay(10);
+  digitalWrite(PinRS485, 0);
 
-float TempParaTensao(float _temp) {
-  return 0.0411 * _temp - 0.0226;
+  byte byteReceived;
+  bool received = false;
+  for (int i = 0; i < 5 && !received; i++) {
+    delay(100);
+    if (RS485Serial.available()) {
+      byteReceived = RS485Serial.read();    // Read received byte
+      if (byteReceived == 0xB1) erro_rs485 = true;
+      debugPrint("Arduino Ventilador: "); debugPrintLn(byteReceived == 0xB1 ? "ok" : "erro");
+    }
+  }
 }
-
 
