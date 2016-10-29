@@ -45,6 +45,7 @@ const byte appSKey[16] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 
 
 bool ligarVent;
 float tempI, umidI, tempE, umidE, tempGrao, altura;
+byte byteVent;
 
 byte data[12]; //0: Bits controle / 1: Uso estimado / 2,3: temp grao / 4,5: temp int / 6,7: umid int / 8,9: temp ext / 10,11: umid ext
 float tensaoRef;
@@ -100,11 +101,17 @@ void loop()
   //Envia os dados LoRa
   ttu.sendBytes(data, sizeof(data), 30, true);
 
-  //Envia comando de ligar para o segundo arduino
+  //Checa a resposta do servidor
 
+  //Envia comando de ligar para o segundo arduino
+  EnviaRS485();
 
   //Aguarda próxima transmissão
-
+  for (int i = 0; i < 60; i++){
+    for (int j = 0; j < 60; j++){
+      delay(1000);
+    }
+  }
 }
 
 //FUNÇÕES-----------------------------------------------------------------------------------------------------------------//
@@ -249,19 +256,24 @@ void SetaBitsControle()
 }
 
 void EnviaRS485() {
-  digitalWrite(PinRS485, 1);  // Enable RS485 Transmit
-  RS485Serial.write(0xA1);    //Envia dado para ligar/desligar
-  delay(10);
-  digitalWrite(PinRS485, 0);
+  erro_rs485 = false;
 
   byte byteReceived;
   bool received = false;
+
   for (int i = 0; i < 5 && !received; i++) {
-    delay(100);
+    digitalWrite(PinRS485, 1);  // Enable RS485 Transmit
+    RS485Serial.write(byteVent);    //Envia dado para ligar/desligar
+    delay(10);
+    digitalWrite(PinRS485, 0);
+
+
+    delay(1000);
     if (RS485Serial.available()) {
       byteReceived = RS485Serial.read();    // Read received byte
+      received = true;
       if (byteReceived == 0xB1) erro_rs485 = true;
-      debugPrint("Arduino Ventilador: "); debugPrintLn(byteReceived == 0xB1 ? "ok" : "erro");
+      debugPrint("Arduino Ventilador: "); debugPrintLn(!erro_rs485 ? "ok" : "erro");
     }
   }
 }
